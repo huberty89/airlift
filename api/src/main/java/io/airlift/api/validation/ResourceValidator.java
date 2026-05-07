@@ -103,8 +103,11 @@ public interface ResourceValidator
                 Type targetType = modelResource.type();
 
                 if (!state.contains(PARENT_IS_READ_ONLY) && !state.contains(IS_RESULT_RESOURCE)) {
-                    if (!(targetType instanceof Class<?> clazz) || (!String.class.isAssignableFrom(clazz) && !ApiId.class.isAssignableFrom(clazz) && !clazz.isEnum() && !clazz.isAnnotationPresent(ApiResource.class) && !clazz.isAnnotationPresent(ApiPolyResource.class))) {
-                        throw new ValidatorException("Collections that are not read only must be Collection<String> or Collection<? extends ApiAbstractId> or Collection<? extends Enum> or a collection of resources. %s is not".formatted(targetType));
+                    boolean isAllowedListElement = (targetType instanceof Class<?> clazz)
+                            && (String.class.isAssignableFrom(clazz) || ApiId.class.isAssignableFrom(clazz) || clazz.isEnum() || clazz.isAnnotationPresent(ApiResource.class) || clazz.isAnnotationPresent(ApiPolyResource.class));
+                    boolean isAllowedPossibleTypes = Object.class.equals(targetType) && !modelResource.possibleTypes().isEmpty();
+                    if (!isAllowedListElement && !isAllowedPossibleTypes) {
+                        throw new ValidatorException("Collections that are not read only must be Collection<String> or Collection<? extends ApiAbstractId> or Collection<? extends Enum> or Collection<@ApiPossibleTypes(...) Object> or a collection of resources. %s is not".formatted(targetType));
                     }
                 }
 
@@ -123,15 +126,15 @@ public interface ResourceValidator
             case MAP -> {
                 if (modelResource.modifiers().contains(OPTIONAL)) {
                     Type type = extractGenericParameter(modelResource.containerType(), 0);
-                    validateMap(type);
+                    validateMap(type, modelResource.possibleTypes());
                 }
                 else {
-                    validateMap(modelResource.containerType());
+                    validateMap(modelResource.containerType(), modelResource.possibleTypes());
                 }
             }
 
             case BASIC -> {
-                if (!state.contains(ALLOW_BASIC_RESOURCES)) {
+                if (!state.contains(ALLOW_BASIC_RESOURCES) && modelResource.possibleTypes().isEmpty()) {
                     throw new ValidatorException("Basic types not allowed here. Name: %s".formatted(modelResource.name()));
                 }
             }

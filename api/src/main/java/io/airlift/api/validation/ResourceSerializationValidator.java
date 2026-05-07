@@ -148,6 +148,10 @@ public class ResourceSerializationValidator
         if (String.class.isAssignableFrom(clazz)) {
             return "empty"; // so that ErrorDetailType.Emtpy doesn't throw
         }
+        if (Object.class.equals(clazz)) {
+            // For @ApiPossibleTypes Object positions: a String round-trips through Jackson as Object.
+            return "anyValue";
+        }
         if (Instant.class.isAssignableFrom(clazz)) {
             return Instant.now();
         }

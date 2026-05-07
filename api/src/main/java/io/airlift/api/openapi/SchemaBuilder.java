@@ -141,19 +141,44 @@ class SchemaBuilder
             return asList(modelResource, asRef(new Schema<>().name(schemaName(referencedModelResource, mode, Optional.empty()))));
         }
 
+        // @ApiPossibleTypes resources are inlined as a oneOf wherever they appear (direct field,
+        // Optional value, list element, map value). We never name them or share them via the cache.
+        if (!modelResource.possibleTypes().isEmpty() && modelResource.resourceType() != ModelResourceType.LIST && modelResource.resourceType() != ModelResourceType.MAP) {
+            return buildPossibleTypesSchema(modelResource);
+        }
+
         typeToResourceCache.putIfAbsent(modelResource.type(), modelResource);
 
         Schema<?> schema = schemas.get(new SchemaKey(Optional.empty(), modelResource.containerType(), modelResource.resourceType(), mode));
         if (schema == null) {
             schema = switch (modelResource.resourceType()) {
                 case LIST -> asList(modelResource, buildSchema(asResource(removeContainer(modelResource)), mode));
-                case MAP -> new MapSchema().description(adjustedDescription(modelResource)).additionalProperties(buildSchema(asResource(removeContainer(modelResource)), mode));
+                case MAP -> new MapSchema().description(adjustedDescription(modelResource)).additionalProperties(buildMapValueSchema(modelResource, mode));
                 case PAGINATED_RESULT -> buildPaginatedSchema(modelResource);
                 default -> buildBasicOrResourceSchema(modelResource, mode);
             };
         }
         else {
             schema = asRef(schema);
+        }
+        return schema;
+    }
+
+    private Schema<?> buildMapValueSchema(ModelResource modelResource, BuildSchemaMode mode)
+    {
+        if (!modelResource.possibleTypes().isEmpty()) {
+            return buildPossibleTypesSchema(modelResource);
+        }
+        return buildSchema(asResource(removeContainer(modelResource)), mode);
+    }
+
+    private Schema<?> buildPossibleTypesSchema(ModelResource modelResource)
+    {
+        Schema<?> schema = new Schema<>().description(adjustedDescription(modelResource));
+        for (Class<?> clazz : modelResource.possibleTypes()) {
+            Schema<?> basic = buildBasicSchema(clazz)
+                    .orElseThrow(() -> new IllegalStateException("@ApiPossibleTypes only supports basic types, got: " + clazz));
+            schema.addOneOfItem(basic);
         }
         return schema;
     }

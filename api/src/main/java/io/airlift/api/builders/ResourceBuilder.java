@@ -9,6 +9,7 @@ import io.airlift.api.ApiId;
 import io.airlift.api.ApiMultiPart;
 import io.airlift.api.ApiMultiPart.ApiMultiPartFormWithResource;
 import io.airlift.api.ApiPolyResource;
+import io.airlift.api.ApiPossibleTypes;
 import io.airlift.api.ApiReadOnly;
 import io.airlift.api.ApiResource;
 import io.airlift.api.ApiResourceVersion;
@@ -22,6 +23,7 @@ import io.airlift.api.model.ModelResourceModifier;
 import io.airlift.api.model.ModelResourceType;
 import io.airlift.api.validation.ValidatorException;
 
+import java.lang.reflect.AnnotatedType;
 import java.lang.reflect.Field;
 import java.lang.reflect.RecordComponent;
 import java.lang.reflect.Type;
@@ -41,7 +43,10 @@ import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.airlift.api.internals.Generics.extractAnnotatedGenericParameter;
 import static io.airlift.api.internals.Generics.extractGenericParameter;
+import static io.airlift.api.internals.Generics.extractPossibleTypes;
+import static io.airlift.api.internals.Generics.possibleTypesAsList;
 import static io.airlift.api.internals.Generics.typeResolver;
 import static io.airlift.api.internals.Mappers.openApiName;
 import static io.airlift.api.model.ModelResourceModifier.HAS_RESOURCE_ID;
@@ -115,13 +120,18 @@ public class ResourceBuilder
 
     public ModelResource build()
     {
-        return internalBuildAndAdd(Optional.empty(), resource);
+        return internalBuildAndAdd(Optional.empty(), resource, Optional.empty());
     }
 
-    private ModelResource internalBuildAndAdd(Optional<String> componentName, Type resource)
+    private ModelResource internalBuildAndAdd(Optional<String> componentName, Type resource, Optional<AnnotatedType> annotatedType)
     {
-        ModelResource modelResource = internalBuild(componentName, resource);
-        builtResources.put(resource, modelResource);
+        ModelResource modelResource = internalBuild(componentName, resource, annotatedType);
+        // Possible-types resources are always inlined; never cached or shared. Multiple
+        // List<@ApiPossibleTypes(...) Object> with different listed types would otherwise
+        // collide on the Object.class key.
+        if (modelResource.possibleTypes().isEmpty()) {
+            builtResources.put(resource, modelResource);
+        }
         return modelResource;
     }
 
@@ -133,27 +143,36 @@ public class ResourceBuilder
         return supportedBasicResourceTypes.stream().anyMatch(clazz -> clazz.isAssignableFrom(type));
     }
 
-    private ModelResource internalBuild(Optional<String> componentName, Type resource)
+    private ModelResource internalBuild(Optional<String> componentName, Type resource, Optional<AnnotatedType> annotatedType)
     {
         ModelResource existingModelResource = builtResources.get(resource);    // can't use computeIfAbsent() as this method is called recursively
         if (existingModelResource != null) {
             return existingModelResource;
         }
 
+        Optional<ApiPossibleTypes> possibleTypes = extractPossibleTypes(annotatedType);
+        if (possibleTypes.isPresent()) {
+            if (!Object.class.equals(resource)) {
+                throw new ValidatorException("@%s is only allowed on Object types. Found on: %s".formatted(ApiPossibleTypes.class.getSimpleName(), resource));
+            }
+            return buildPossibleTypesResource(possibleTypes.orElseThrow());
+        }
+
         TypeToken<?> typeToken = TypeToken.of(typeResolver.resolveType(resource));
 
         if (typeToken.isSubtypeOf(Optional.class)) {
-            return internalBuildAndAdd(componentName, extractGenericParameter(typeToken.getType(), 0))
+            return internalBuildAndAdd(componentName, extractGenericParameter(typeToken.getType(), 0), extractAnnotatedGenericParameter(annotatedType, 0))
                     .withModifier(OPTIONAL)
                     .withContainerType(resource);
         }
 
         if (typeToken.isSubtypeOf(Collection.class)) {
             Type targetType = extractGenericParameter(typeToken.getType(), 0);
+            Optional<AnnotatedType> targetAnnotatedType = extractAnnotatedGenericParameter(annotatedType, 0);
 
             recursionChecker.pushRecursionAllowed(true);
             try {
-                return internalBuildAndAdd(componentName, targetType)
+                return internalBuildAndAdd(componentName, targetType, targetAnnotatedType)
                         .asResourceType(ModelResourceType.LIST)
                         .withContainerType(resource);
             }
@@ -163,6 +182,16 @@ public class ResourceBuilder
         }
 
         if (typeToken.isSubtypeOf(Map.class)) {
+            Optional<AnnotatedType> annotatedValue = extractAnnotatedGenericParameter(annotatedType, 1);
+            Optional<ApiPossibleTypes> mapValuePossibleTypes = extractPossibleTypes(annotatedValue);
+            Type valueType = extractGenericParameter(typeToken.getType(), 1);
+
+            if (mapValuePossibleTypes.isPresent() && Object.class.equals(valueType)) {
+                List<Class<?>> classes = validatedPossibleTypes(mapValuePossibleTypes.orElseThrow());
+                return new ModelResource(Object.class, "Object", "n/a", ImmutableList.of(), ModelResourceType.MAP)
+                        .withContainerType(resource)
+                        .withPossibleTypes(classes);
+            }
             return new ModelResource(String.class, String.class.getSimpleName(), "n/a", ImmutableList.of(), ModelResourceType.MAP).withContainerType(resource);
         }
 
@@ -179,7 +208,7 @@ public class ResourceBuilder
         }
 
         if (typeToken.isSubtypeOf(ApiStreamResponse.class)) {
-            return internalBuildAndAdd(componentName, extractGenericParameter(typeToken.getType(), 0))
+            return internalBuildAndAdd(componentName, extractGenericParameter(typeToken.getType(), 0), extractAnnotatedGenericParameter(annotatedType, 0))
                     .withContainerType(typeToken.getType())
                     .withModifier(IS_STREAMING_RESPONSE)
                     .withModifier(HAS_RESOURCE_ID)
@@ -190,7 +219,7 @@ public class ResourceBuilder
         if (typeToken.isSubtypeOf(ApiMultiPart.class)) {
             Type multiPartResourceType = extractGenericParameter(typeToken.getType(), 0);
 
-            ModelResource modelResource = internalBuildAndAdd(componentName, multiPartResourceType);
+            ModelResource modelResource = internalBuildAndAdd(componentName, multiPartResourceType, extractAnnotatedGenericParameter(annotatedType, 0));
             if (typeToken.isSubtypeOf(ApiMultiPartFormWithResource.class)) {
                 modelResource = modelResource.withModifier(MULTIPART_RESOURCE_IS_FIRST_ITEM);
             }
@@ -214,6 +243,27 @@ public class ResourceBuilder
         }
 
         return throwInvalid(typeToken.getType(), componentName);
+    }
+
+    private ModelResource buildPossibleTypesResource(ApiPossibleTypes possibleTypes)
+    {
+        List<Class<?>> classes = validatedPossibleTypes(possibleTypes);
+        return new ModelResource(Object.class, "Object", "n/a", ImmutableList.of(), ModelResourceType.BASIC)
+                .withPossibleTypes(classes);
+    }
+
+    private static List<Class<?>> validatedPossibleTypes(ApiPossibleTypes possibleTypes)
+    {
+        List<Class<?>> classes = possibleTypesAsList(Optional.of(possibleTypes));
+        if (classes.isEmpty()) {
+            throw new ValidatorException("@%s must list at least one type".formatted(ApiPossibleTypes.class.getSimpleName()));
+        }
+        for (Class<?> clazz : classes) {
+            if (!isBasic(clazz, true)) {
+                throw new ValidatorException("@%s only supports basic types. Found: %s".formatted(ApiPossibleTypes.class.getSimpleName(), clazz));
+            }
+        }
+        return classes;
     }
 
     private ModelResource buildResourceRecordFromAnnotation(TypeToken<?> typeToken, Class<?> clazz)
@@ -282,7 +332,7 @@ public class ResourceBuilder
 
                 String appliedDescription = (forcedDescription != null) ? forcedDescription : Optional.ofNullable(componentDescription).map(ApiDescription::value).orElse("");
 
-                ModelResource componentModelResource = internalBuildAndAdd(Optional.of(recordComponent.getName()), recordComponent.getGenericType());
+                ModelResource componentModelResource = internalBuildAndAdd(Optional.of(recordComponent.getName()), recordComponent.getGenericType(), Optional.of(recordComponent.getAnnotatedType()));
                 // the component resource name will not be accurate as it gets set to this record's component name, so set the openApiName appropriately
                 String componentOpenApiName = componentModelResource.openApiName().orElseGet(componentModelResource::name);
                 ModelResource component = componentModelResource.withNameAndDescription(recordComponent.getName(), Optional.of(componentOpenApiName), appliedDescription);
@@ -310,7 +360,7 @@ public class ResourceBuilder
     private ModelResource buildPolyResource(Optional<String> componentName, ApiPolyResource apiPolyResource, Class<?> clazz)
     {
         List<ModelResource> subResources = Stream.of(clazz.getPermittedSubclasses())
-                .map(subResourceClass -> internalBuildAndAdd(componentName, subResourceClass))
+                .map(subResourceClass -> internalBuildAndAdd(componentName, subResourceClass, Optional.empty()))
                 .collect(toImmutableList());
 
         return new ModelResource(clazz, apiPolyResource.name(), openApiName(apiPolyResource.openApiAlternateName()), apiPolyResource.description(), ImmutableList.of(), RESOURCE, ImmutableSet.of(), ImmutableSet.copyOf(apiPolyResource.quotas()))

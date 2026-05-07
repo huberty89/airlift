@@ -1,6 +1,7 @@
 package io.airlift.api;
 
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.api.validation.ValidatorException;
 
@@ -112,7 +113,7 @@ public record ApiPatch<RESOURCE>(Map<String, Function<Type, Object>> fields)
     private static Object getSecondLevel(RecordComponent recordComponent, Object argumentValue, Object appliedValue, Set<String> secondLevelFields)
     {
         if ((argumentValue instanceof Map<?, ?> argumentMap) && (appliedValue instanceof Map<?, ?> appliedMap)) {
-            validateMap(recordComponent.getGenericType());
+            validateMap(recordComponent.getGenericType(), ImmutableList.of());
 
             Map<String, String> copy = new LinkedHashMap<>((Map<String, String>) argumentMap);
             secondLevelFields.forEach(field -> {
