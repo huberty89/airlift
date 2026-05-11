@@ -4,6 +4,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.reflect.TypeToken;
+import io.airlift.api.ApiAllowObject;
 import io.airlift.api.ApiDescription;
 import io.airlift.api.ApiId;
 import io.airlift.api.ApiMultiPart;
@@ -22,7 +23,10 @@ import io.airlift.api.model.ModelResourceModifier;
 import io.airlift.api.model.ModelResourceType;
 import io.airlift.api.validation.ValidatorException;
 
+import java.lang.reflect.AnnotatedParameterizedType;
+import java.lang.reflect.AnnotatedType;
 import java.lang.reflect.Field;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.RecordComponent;
 import java.lang.reflect.Type;
 import java.math.BigDecimal;
@@ -46,6 +50,7 @@ import static io.airlift.api.internals.Generics.typeResolver;
 import static io.airlift.api.internals.Mappers.openApiName;
 import static io.airlift.api.model.ModelResourceModifier.HAS_RESOURCE_ID;
 import static io.airlift.api.model.ModelResourceModifier.HAS_VERSION;
+import static io.airlift.api.model.ModelResourceModifier.IS_ANY_OBJECT;
 import static io.airlift.api.model.ModelResourceModifier.IS_MULTIPART_FORM;
 import static io.airlift.api.model.ModelResourceModifier.IS_STREAMING_RESPONSE;
 import static io.airlift.api.model.ModelResourceModifier.IS_UNWRAPPED;
@@ -282,7 +287,8 @@ public class ResourceBuilder
 
                 String appliedDescription = (forcedDescription != null) ? forcedDescription : Optional.ofNullable(componentDescription).map(ApiDescription::value).orElse("");
 
-                ModelResource componentModelResource = internalBuildAndAdd(Optional.of(recordComponent.getName()), recordComponent.getGenericType());
+                ModelResource componentModelResource = buildAnyObjectContainer(recordComponent.getAnnotatedType())
+                        .orElseGet(() -> internalBuildAndAdd(Optional.of(recordComponent.getName()), recordComponent.getGenericType()));
                 // the component resource name will not be accurate as it gets set to this record's component name, so set the openApiName appropriately
                 String componentOpenApiName = componentModelResource.openApiName().orElseGet(componentModelResource::name);
                 ModelResource component = componentModelResource.withNameAndDescription(recordComponent.getName(), Optional.of(componentOpenApiName), appliedDescription);
@@ -339,5 +345,40 @@ public class ResourceBuilder
     private Class<?> unboxIfNeeded(Class<?> clazz)
     {
         return supportedBoxedResourceTypes.getOrDefault(clazz, clazz);
+    }
+
+    static Optional<ModelResource> buildAnyObjectContainer(AnnotatedType annotatedType)
+    {
+        if (!(annotatedType instanceof AnnotatedParameterizedType apt) ||
+                !(apt.getType() instanceof ParameterizedType parameterizedType) ||
+                !(parameterizedType.getRawType() instanceof Class<?> rawClass)) {
+            return Optional.empty();
+        }
+
+        AnnotatedType[] typeArgs = apt.getAnnotatedActualTypeArguments();
+
+        if (Collection.class.isAssignableFrom(rawClass) && typeArgs.length == 1 && isAnyObjectArgument(typeArgs[0])) {
+            return Optional.of(anyObjectLeafResource()
+                    .asResourceType(ModelResourceType.LIST)
+                    .withContainerType(parameterizedType));
+        }
+
+        if (Map.class.isAssignableFrom(rawClass) && typeArgs.length == 2 && String.class.equals(typeArgs[0].getType()) && isAnyObjectArgument(typeArgs[1])) {
+            return Optional.of(anyObjectLeafResource()
+                    .asResourceType(ModelResourceType.MAP)
+                    .withContainerType(parameterizedType));
+        }
+
+        return Optional.empty();
+    }
+
+    private static boolean isAnyObjectArgument(AnnotatedType type)
+    {
+        return Object.class.equals(type.getType()) && type.isAnnotationPresent(ApiAllowObject.class);
+    }
+
+    private static ModelResource anyObjectLeafResource()
+    {
+        return new ModelResource(Object.class, Object.class.getSimpleName(), "n/a", ImmutableList.of(), ModelResourceType.BASIC).withModifier(IS_ANY_OBJECT);
     }
 }

@@ -5,10 +5,13 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.airlift.api.ApiAllowObject;
 import io.airlift.api.ApiId;
 import io.airlift.api.ApiPatch;
 import io.airlift.api.ApiPolyResource;
 
+import java.lang.reflect.AnnotatedParameterizedType;
+import java.lang.reflect.AnnotatedType;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.RecordComponent;
 import java.lang.reflect.Type;
@@ -110,9 +113,34 @@ public class ResourceSerializationValidator
         Object[] objects = new Object[recordComponents.length];
         for (int i = 0; i < recordComponents.length; ++i) {
             RecordComponent recordComponent = recordComponents[i];
-            objects[i] = getDefaultValue(validationContext, recordComponent.getType(), recordComponent.getGenericType());
+            objects[i] = anyObjectContainerDefault(recordComponent.getAnnotatedType(), recordComponent.getType())
+                    .orElseGet(() -> getDefaultValue(validationContext, recordComponent.getType(), recordComponent.getGenericType()));
         }
         return objects;
+    }
+
+    private static Optional<Object> anyObjectContainerDefault(AnnotatedType annotatedType, Class<?> rawType)
+    {
+        if (!(annotatedType instanceof AnnotatedParameterizedType apt)) {
+            return Optional.empty();
+        }
+        AnnotatedType[] typeArgs = apt.getAnnotatedActualTypeArguments();
+
+        if (List.class.isAssignableFrom(rawType) && (typeArgs.length == 1) && isAnyObjectArgument(typeArgs[0])) {
+            return Optional.of(ImmutableList.of("any"));
+        }
+        if (Collection.class.isAssignableFrom(rawType) && (typeArgs.length == 1) && isAnyObjectArgument(typeArgs[0])) {
+            return Optional.of(ImmutableSet.of("any"));
+        }
+        if (Map.class.isAssignableFrom(rawType) && (typeArgs.length == 2) && isAnyObjectArgument(typeArgs[1])) {
+            return Optional.of(ImmutableMap.of("key", "any"));
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isAnyObjectArgument(AnnotatedType type)
+    {
+        return Object.class.equals(type.getType()) && type.isAnnotationPresent(ApiAllowObject.class);
     }
 
     private Object getDefaultValue(ValidationContext validationContext, Class<?> clazz, Type type)

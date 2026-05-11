@@ -149,6 +149,23 @@ public class TestConforming
     }
 
     @Test
+    public void testAllowedObjectContainers()
+    {
+        // resource with List<@ApiAllowObject Object> and Map<String, @ApiAllowObject Object> should build through full validation
+        ModelApi modelApi = ApiBuilder.apiBuilder().add(ServiceWithObject.class).build();
+        Module module = ApiModule.builder().addApi(modelApi).build();
+        Guice.createInjector(module, new JsonModule());
+    }
+
+    @Test
+    public void testUnannotatedObjectContainer()
+    {
+        // List<Object> without @ApiAllowObject on the element must still fail validation
+        ModelServices services = ApiBuilder.apiBuilder().add(ServiceWithUnannotatedObject.class).build().modelServices();
+        assertThat(services.errors()).anyMatch(s -> s.contains("not a valid resource type"));
+    }
+
+    @Test
     public void testBadLookup()
     {
         ModelApi modelApi = ApiBuilder.apiBuilder().add(ServiceWithBadLookup.class).build();
